@@ -6,12 +6,12 @@ namespace BattleGame.Scripts
     {
         public string ActivateShield()
         {
-            return "Shield";
+            return "Shield.";
         }
 
         public string FirePowerBomb()
         {
-            return "Power";
+            return "Power.";
         }
 
         public string NoCommandMentioned()

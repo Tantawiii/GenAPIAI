@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using System.Reflection;
+using System.IO;
+using System.Threading.Tasks;
 using LLMUnity;
 using UnityEngine;
 using UnityEngine.UI;
@@ -12,6 +14,17 @@ public class MoveObjectsByCommand : MonoBehaviour
     public LLMCharacter llmCharacter;        // Reference to the AI language model
     public InputField playerText;            // Input field where player types commands
     public InputField aiText;            // Input field where ai response is displayed
+    public Button recordButton;              // Reference to the record/stop button
+    public Text recordButtonText;            // Text component to show recording status
+    
+    // Speech recognition components
+    private AudioSource audioSource;
+    private bool isRecording = false;
+    private float maxRecordingTime = 30f;    // Maximum recording time in seconds
+    [SerializeField]
+    private MonoBehaviour speechToText;  // Reference to Speech-To-Text component that implements ISpeechToText
+
+    private ISpeechToText SpeechToText => speechToText as ISpeechToText;
     
     // References to the UI objects that can be moved
     public RectTransform circularEnemy;
@@ -22,9 +35,21 @@ public class MoveObjectsByCommand : MonoBehaviour
 
     void Start()
     {
-        // Set up the input field to listen for submissions
-        playerText.onSubmit.AddListener(onInputFieldSubmit);
-        playerText.Select();  // Automatically focus the input field
+        // Set up audio source for recording
+        audioSource = gameObject.AddComponent<AudioSource>();
+        
+        // Set up the record button
+        if (recordButton != null)
+        {
+            recordButton.onClick.AddListener(ToggleRecording);
+            UpdateRecordButtonText();
+        }
+
+        // Verify speech to text component
+        if (speechToText == null)
+        {
+            Debug.LogError("Speech To Text component not assigned!");
+        }
 
         // Assign player reference to all enemies
         Enemy[] enemies = new Enemy[] {
@@ -40,6 +65,130 @@ public class MoveObjectsByCommand : MonoBehaviour
             {
                 enemy.playerTarget = playerSpaceship;
             }
+        }
+    }
+
+    private void UpdateRecordButtonText()
+    {
+        if (recordButtonText != null)
+        {
+            recordButtonText.text = isRecording ? "Stop" : "Record";
+        }
+    }
+
+    private async void ToggleRecording()
+    {
+        if (!isRecording)
+        {
+            // Start recording
+            isRecording = true;
+            UpdateRecordButtonText();
+            
+            if (SpeechToText != null)
+            {
+                SpeechToText.StartRecording();
+            }
+        }
+        else
+        {
+            // Stop recording
+            isRecording = false;
+            UpdateRecordButtonText();
+            
+            if (SpeechToText != null)
+            {
+                string recognizedText = await SpeechToText.StopRecordingAndRecognize();
+                
+                // Display recognized text in player input
+                playerText.text = recognizedText;
+                
+                // Process the command
+                ProcessCommand(recognizedText);
+            }
+            else
+            {
+                Debug.LogError("Speech To Text component not found!");
+                aiText.text = "Sorry, speech recognition is not set up properly.";
+            }
+        }
+    }
+
+    // Process the recognized command
+    private async void ProcessCommand(string message)
+    {
+        try
+        {
+            // Check for special commands first
+            string getCommand = await llmCharacter.Chat(ConstructCommandPrompt(message));
+            SpaceshipController spaceship = playerSpaceship.GetComponent<SpaceshipController>();
+
+            if (spaceship != null)
+            {
+                switch (getCommand)
+                {
+                    case "Shield.":
+                        if (spaceship.IsShieldAvailable())
+                        {
+                            spaceship.ActivateShield();
+                            aiText.text = "Shield activated!";
+                            return;
+                        }
+                        else if (spaceship.IsShieldActive())
+                        {
+                            aiText.text = "Shield is already active!";
+                            return;
+                        }
+                        else
+                        {
+                            aiText.text = "Shield is on cooldown!";
+                            return;
+                        }
+
+                    case "Power.":
+                        spaceship.FirePowerBomb();
+                        aiText.text = "Firing power bomb!";
+                        return;
+                }
+            }
+
+            // Check for targeting commands
+            if (message.ToLower().Contains("target") || message.ToLower().Contains("aim"))
+            {
+                string enemyType = "";
+                if (message.ToLower().Contains("circular")) enemyType = "circular";
+                else if (message.ToLower().Contains("triangular")) enemyType = "triangular";
+                else if (message.ToLower().Contains("miniboss")) enemyType = "miniboss";
+                else if (message.ToLower().Contains("boss")) enemyType = "boss";
+
+                if (!string.IsNullOrEmpty(enemyType) && spaceship != null)
+                {
+                    spaceship.TargetEnemy(enemyType);
+                    aiText.text = $"Targeting {enemyType} enemy";
+                    return;
+                }
+            }
+
+            // Handle movement commands
+            string getDirection = await llmCharacter.Chat(ConstructDirectionPrompt(message));
+            if (getDirection == "MoveLeft" || getDirection == "MoveRight")
+            {
+                Vector3 direction = (Vector3)typeof(DirectionFunctions).GetMethod(getDirection).Invoke(null, null);
+                Vector2 currentPos = playerSpaceship.anchoredPosition;
+                float newX = currentPos.x + (direction.x * 140f);
+                newX = Mathf.Clamp(newX, -140f, 140f);
+                playerSpaceship.anchoredPosition = new Vector2(newX, currentPos.y);
+                aiText.text = $"Moving spaceship {getDirection.Replace("Move", "").ToLower()}";
+            }
+            else
+            {
+                string aiResponse = await llmCharacter.Chat(message);
+                aiText.text = aiResponse;
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Error processing command: {e.Message}");
+            aiText.text = "I couldn't process that command. Please try again.";
         }
     }
 
@@ -86,93 +235,6 @@ public class MoveObjectsByCommand : MonoBehaviour
             prompt += $"- {functionName}\n";
         prompt += "\nAnswer directly with the choice, focusing only on commands";
         return prompt;
-    }
-
-    // Called when the player submits text in the input field
-    async void onInputFieldSubmit(string message)
-    {
-        playerText.interactable = false;
-
-        try
-        {
-            // Check for special commands first
-            string getCommand = await llmCharacter.Chat(ConstructCommandPrompt(message));
-            SpaceshipController spaceship = playerSpaceship.GetComponent<SpaceshipController>();
-
-            if (spaceship != null)
-            {
-                switch (getCommand)
-                {
-                    case "Shield":
-                        if (spaceship.IsShieldAvailable())
-                        {
-                            spaceship.ActivateShield();
-                            aiText.text = "Shield activated!";
-                            return;
-                        }
-                        else if (spaceship.IsShieldActive())
-                        {
-                            aiText.text = "Shield is already active!";
-                            return;
-                        }
-                        else
-                        {
-                            aiText.text = "Shield is on cooldown!";
-                            return;
-                        }
-
-                    case "Power":
-                        spaceship.FirePowerBomb();
-                        aiText.text = "Firing power bomb!";
-                        return;
-                }
-            }
-
-            // Check for targeting commands
-            if (message.ToLower().Contains("target") || message.ToLower().Contains("aim"))
-            {
-                string enemyType = "";
-                if (message.ToLower().Contains("circular")) enemyType = "circular";
-                else if (message.ToLower().Contains("triangular")) enemyType = "triangular";
-                else if (message.ToLower().Contains("miniboss")) enemyType = "miniboss";
-                else if (message.ToLower().Contains("boss")) enemyType = "boss";
-
-                if (!string.IsNullOrEmpty(enemyType) && spaceship != null)
-                {
-                    spaceship.TargetEnemy(enemyType);
-                    aiText.text = $"Targeting {enemyType} enemy";
-                    return;
-                }
-            }
-
-            // Handle movement commands
-            string getDirection = await llmCharacter.Chat(ConstructDirectionPrompt(message));
-            if (getDirection == "MoveLeft" || getDirection == "MoveRight")
-            {
-                Vector3 direction = (Vector3)typeof(DirectionFunctions).GetMethod(getDirection).Invoke(null, null);
-                Vector2 currentPos = playerSpaceship.anchoredPosition;
-                float newX = currentPos.x + (direction.x * 140f);
-                newX = Mathf.Clamp(newX, -140f, 140f);
-                playerSpaceship.anchoredPosition = new Vector2(newX, currentPos.y);
-                aiText.text = $"Moving spaceship {getDirection.Replace("Move", "").ToLower()}";
-            }
-            else
-            {
-                string aiResponse = await llmCharacter.Chat(message);
-                aiText.text = aiResponse;
-            }
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"Error processing command: {e.Message}");
-            aiText.text = "I couldn't process that command. Please try again.";
-        }
-        finally
-        {
-            playerText.interactable = true;
-            playerText.text = "";
-            playerText.Select();
-        }
     }
 
     // Helper method to get the correct square based on color
